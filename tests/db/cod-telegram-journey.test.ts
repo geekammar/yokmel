@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import {
   appUser,
@@ -20,6 +20,7 @@ import {
   storeCommerceSetting,
   storeLanguageSetting,
   storeMembership,
+  telegramActiveStorefront,
   telegramConnection,
   telegramNavigationContext,
 } from "@/db/schema";
@@ -405,6 +406,7 @@ beforeEach(async () => {
       "order",
       "cart_item",
       "cart",
+      "telegram_active_storefront",
       "telegram_navigation_context",
       "telegram_managed_update"
     restart identity cascade
@@ -436,6 +438,24 @@ beforeEach(async () => {
 
 function db() {
   return testDb!.db;
+}
+
+async function activeStorefrontRow(
+  buyerId: number,
+  connectionId = fixture.connectionAId,
+) {
+  const [row] = await db()
+    .select()
+    .from(telegramActiveStorefront)
+    .where(
+      and(
+        eq(telegramActiveStorefront.connectionId, connectionId),
+        eq(telegramActiveStorefront.telegramUserId, buyerId),
+        eq(telegramActiveStorefront.telegramChatId, buyerId),
+      ),
+    )
+    .limit(1);
+  return row;
 }
 
 function nextUpdateId(): number {
@@ -676,6 +696,12 @@ function lastText(transport: FakeTelegramTransport): string {
   );
 }
 
+function lastScreenMessage(
+  transport: FakeTelegramTransport,
+): { messageId: number; text: string; replyMarkup?: unknown } | undefined {
+  return transport.editedMessages.at(-1) ?? transport.sentMessages.at(-1);
+}
+
 function lastReceipt(
   transport: FakeTelegramTransport,
 ): { text: string; messageId: number } | undefined {
@@ -779,7 +805,7 @@ async function completeReview(
     secret,
   );
   expect(reviewed.status).toBe(200);
-  const reviewMessage = reviewed.transport.sentMessages.at(-1);
+  const reviewMessage = lastScreenMessage(reviewed.transport);
   expect(reviewMessage?.text).toContain("Review your order");
   expect(reviewMessage?.text).toContain("Subtotal: 22.00 SAR");
   expect(reviewMessage?.text).toContain("Delivery fee: 15.00 SAR");
@@ -848,6 +874,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
 
     const unavailable = createFakeTelegramTransport();
     unavailable.failPhotoWith = "Bad Request: cannot read photo";
+    unavailable.failMediaWith = "Bad Request: cannot read photo";
     const fallback = await call(fixture.connectionAId,
       messageUpdate(BUYER_A, "/start", {}, "en"), "bot-secret-a", unavailable);
     expect(fallback.status).toBe(200);
@@ -904,7 +931,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     ).toBe(true);
     expect(lastButton(result.transport, "prods")?.callback_data).toBe("prods");
 
-    const resultMessage = result.transport.sentMessages.at(-1)!;
+    const resultMessage = lastScreenMessage(result.transport)!;
     const pageUpdate = callbackUpdate(BUYER_A, "catalog-search:1", "en", resultMessage.messageId);
     const page = await call(fixture.connectionAId, {
       ...pageUpdate,
@@ -1555,7 +1582,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       messageUpdate(BUYER_A, "١٢٣ شارع الاختبار الاصطناعي", {}, "ar"),
     );
     expect(reviewed.status).toBe(200);
-    const reviewMessage = reviewed.transport.sentMessages.at(-1);
+    const reviewMessage = lastScreenMessage(reviewed.transport);
     expect(reviewMessage?.text).toContain("راجع طلبك");
     expect(reviewMessage?.text).toContain("المجموع الفرعي: 22.00 SAR");
     expect(reviewMessage?.text).toContain("الدفع عند الاستلام");
@@ -1615,11 +1642,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       messageUpdate(BUYER_A, "123 Synthetic Telegram Street"),
     );
     expect(valid.status).toBe(200);
-    expect(
-      valid.transport.sentMessages.some((message) =>
-        message.text.includes("Review your order"),
-      ),
-    ).toBe(true);
+    expect(lastText(valid.transport)).toContain("Review your order");
     expect(await db().select().from(order)).toHaveLength(0);
   });
 
@@ -2318,7 +2341,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     expect(lastButton(initialHome.transport, latest)).toBeUndefined();
 
     const { confirmData, transport: reviewTransport } = await completeReview();
-    const reviewId = reviewTransport.sentMessages.at(-1)!.messageId;
+    const reviewId = lastScreenMessage(reviewTransport)!.messageId;
     const transport = createFakeTelegramTransport();
     transport.failSendWith = "Request timed out";
     transport.failSendKind = "timeout";
@@ -2351,7 +2374,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       .where(eq(storeCommerceSetting.storeId, fixture.storeAId));
     const home = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
     expect(lastButton(home.transport, latest)?.text).toBe("Latest COD order");
-    const homeId = home.transport.sentMessages.at(-1)!.messageId;
+    const homeId = lastScreenMessage(home.transport)!.messageId;
     const recovered = await call(
       fixture.connectionAId,
       callbackUpdate(BUYER_A, latest, "en", homeId),
@@ -2441,7 +2464,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
         { db: dbOverride },
       );
       expect(result.status).toBe(200);
-      return result.transport.sentMessages.at(-1)!;
+      return lastScreenMessage(result.transport)!;
     }
 
     async function openSearchPage(
@@ -2858,10 +2881,13 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       );
 
       // Direct-entry Back still reaches the product's own category even while
-      // optional context storage is failing.
+      // optional context storage is failing. The search result is the current
+      // active screen, so use its own product button and message.
+      const currentProduct = buttonFor(results, "p:");
+      expect(currentProduct?.callback_data).toBe(`p:${firstProductId}`);
       const product = await clickNavigation(
-        listProduct!.callback_data!,
-        listPage.messageId,
+        currentProduct!.callback_data!,
+        results.messageId,
         { db: failing },
       );
       const productCard = product.editedMessages.at(-1)!;
@@ -2968,6 +2994,426 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       const afterSecond = await inactiveRows();
       expect(afterSecond).toHaveLength(1);
       expect(afterSecond[0].navigationToken).toBe(unexpiredToken);
+    });
+  });
+
+  describe("managed active storefront message", () => {
+    it("edits the active message in place across text updates and callbacks", async () => {
+      const buyer = 93001;
+      const start = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+      );
+      const home = start.transport.sentMessages.at(-1)!;
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: home.messageId,
+        route: "home",
+        inputMode: "none",
+        revision: 1,
+        hasMedia: false,
+      });
+
+      const products = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "prods", "en", home.messageId),
+      );
+      expect(products.transport.sentMessages).toHaveLength(0);
+      expect(products.transport.editedMessages.at(-1)).toMatchObject({
+        messageId: home.messageId,
+      });
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: home.messageId,
+        route: "products",
+        revision: 2,
+      });
+
+      const again = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+      );
+      expect(again.transport.sentMessages).toHaveLength(0);
+      expect(again.transport.editedMessages.at(-1)?.messageId).toBe(
+        home.messageId,
+      );
+
+      const unknownText = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "hello there", {}, "en"),
+      );
+      expect(unknownText.transport.sentMessages).toHaveLength(0);
+      expect(unknownText.transport.editedMessages.at(-1)?.messageId).toBe(
+        home.messageId,
+      );
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: home.messageId,
+        route: "home",
+        inputMode: "none",
+        revision: 4,
+      });
+    });
+
+    it("allows one confirmed replacement and rejects callbacks from the retired message", async () => {
+      const buyer = 93002;
+      productContract.set(fixture.productAId, {
+        imageUrl: "https://cdn.example.test/products/bot-a.jpg",
+        availability: { available: 3, inStock: true },
+      });
+
+      const transport = createFakeTelegramTransport();
+      const start = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+        "bot-secret-a",
+        transport,
+      );
+      const home = start.transport.sentMessages.at(-1)!;
+
+      const product = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, `p:${fixture.productAId}`, "en", home.messageId),
+        "bot-secret-a",
+        transport,
+      );
+      const photo = product.transport.sentPhotos.at(-1)!;
+      expect(photo).toBeDefined();
+      expect(photo.messageId).not.toBe(home.messageId);
+      expect(
+        product.transport.editedReplyMarkups.some(
+          (entry) =>
+            entry.messageId === home.messageId &&
+            entry.replyMarkup?.inline_keyboard.length === 0,
+        ),
+      ).toBe(true);
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: photo.messageId,
+        hasMedia: true,
+        route: "product",
+      });
+
+      transport.failEditWith =
+        "Bad Request: There is no text in the message to edit";
+      transport.failEditKind = "not_editable";
+      const sentBeforeReplacement = transport.sentMessages.length;
+      const cart = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "cart", "en", photo.messageId),
+        "bot-secret-a",
+        transport,
+      );
+      expect(cart.transport.sentMessages).toHaveLength(
+        sentBeforeReplacement + 1,
+      );
+      const replacementMessage = cart.transport.sentMessages.at(-1)!;
+      expect(replacementMessage.text).toContain("Your cart is empty");
+      const replacementMessageId = replacementMessage.messageId;
+      expect(replacementMessageId).not.toBe(photo.messageId);
+      expect(
+        cart.transport.editedReplyMarkups.some(
+          (entry) =>
+            entry.messageId === photo.messageId &&
+            entry.replyMarkup?.inline_keyboard.length === 0,
+        ),
+      ).toBe(true);
+      const afterReplacement = await activeStorefrontRow(buyer);
+      expect(afterReplacement).toMatchObject({
+        activeMessageId: replacementMessageId,
+        hasMedia: false,
+        route: "cart",
+      });
+
+      transport.failEditWith = undefined;
+      transport.failEditKind = undefined;
+      const sentBeforeStale = transport.sentMessages.length;
+      const editedBeforeStale = transport.editedMessages.length;
+      const stale = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "prods", "en", photo.messageId),
+        "bot-secret-a",
+        transport,
+      );
+      expect(stale.status).toBe(200);
+      expect(stale.transport.answeredCallbacks.at(-1)?.text).toContain(
+        "no longer active",
+      );
+      expect(stale.transport.sentMessages).toHaveLength(sentBeforeStale);
+      expect(stale.transport.editedMessages).toHaveLength(editedBeforeStale);
+      expect(await activeStorefrontRow(buyer)).toEqual(afterReplacement);
+    });
+
+    it("does not replace or advance state when an edit outcome is ambiguous, then retries the same update", async () => {
+      const buyer = 93003;
+      const start = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+      );
+      const home = start.transport.sentMessages.at(-1)!;
+      const update = callbackUpdate(buyer, "prods", "en", home.messageId);
+
+      const failing = createFakeTelegramTransport();
+      failing.failEditWith = "Request timed out";
+      failing.failEditKind = "timeout";
+      const failed = await call(
+        fixture.connectionAId,
+        update,
+        "bot-secret-a",
+        failing,
+      );
+      expect(failed.status).toBe(500);
+      expect(failed.transport.sentMessages).toHaveLength(0);
+      expect(failed.transport.editedMessages).toHaveLength(0);
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: home.messageId,
+        route: "home",
+        revision: 1,
+      });
+
+      const retried = createFakeTelegramTransport();
+      const recovered = await call(
+        fixture.connectionAId,
+        update,
+        "bot-secret-a",
+        retried,
+      );
+      expect(recovered.status).toBe(200);
+      expect(recovered.transport.sentMessages).toHaveLength(0);
+      expect(recovered.transport.editedMessages.at(-1)?.messageId).toBe(
+        home.messageId,
+      );
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: home.messageId,
+        route: "products",
+        revision: 2,
+      });
+    });
+
+    it("rejects a delayed update that would overwrite a newer screen", async () => {
+      const buyer = 93004;
+      const start = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+      );
+      const home = start.transport.sentMessages.at(-1)!;
+
+      await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "prods", "en", home.messageId),
+      );
+      await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "home", "en", home.messageId),
+      );
+      const current = await activeStorefrontRow(buyer);
+      expect(current).toMatchObject({ route: "home", revision: 3 });
+
+      const delayed = callbackUpdate(buyer, "prods", "en", home.messageId);
+      delayed.update_id = 1;
+      const staleTransport = createFakeTelegramTransport();
+      const result = await call(
+        fixture.connectionAId,
+        delayed,
+        "bot-secret-a",
+        staleTransport,
+      );
+      expect(result.status).toBe(200);
+      expect(result.transport.answeredCallbacks.at(-1)?.text).toContain(
+        "no longer active",
+      );
+      expect(result.transport.editedMessages).toHaveLength(0);
+      expect(result.transport.sentMessages).toHaveLength(0);
+      expect(await activeStorefrontRow(buyer)).toEqual(current);
+    });
+
+    it("isolates active state by store connection and buyer", async () => {
+      const buyer = 93005;
+      const startA = await call(
+        fixture.connectionAId,
+        messageUpdate(buyer, "/start", {}, "en"),
+      );
+      const homeA = startA.transport.sentMessages.at(-1)!;
+      const startB = await call(
+        fixture.connectionBId,
+        messageUpdate(buyer, "/start", {}, "en"),
+        "bot-secret-b",
+      );
+      const homeB = startB.transport.sentMessages.at(-1)!;
+
+      expect(await activeStorefrontRow(buyer, fixture.connectionAId))
+        .toMatchObject({ activeMessageId: homeA.messageId });
+      expect(await activeStorefrontRow(buyer, fixture.connectionBId))
+        .toMatchObject({ activeMessageId: homeB.messageId });
+
+      const otherBuyer = 93006;
+      const otherStart = await call(
+        fixture.connectionAId,
+        messageUpdate(otherBuyer, "/start", {}, "en"),
+      );
+      const otherHome = otherStart.transport.sentMessages.at(-1)!;
+
+      const returned = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, "prods", "en", homeA.messageId),
+      );
+      expect(returned.status).toBe(200);
+      expect(returned.transport.editedMessages.at(-1)?.messageId).toBe(
+        homeA.messageId,
+      );
+
+      expect(await activeStorefrontRow(buyer, fixture.connectionBId))
+        .toMatchObject({ activeMessageId: homeB.messageId, route: "home" });
+      expect(await activeStorefrontRow(otherBuyer, fixture.connectionAId))
+        .toMatchObject({ activeMessageId: otherHome.messageId, route: "home" });
+      expect(await activeStorefrontRow(buyer, fixture.connectionAId))
+        .toMatchObject({ activeMessageId: homeA.messageId, route: "products" });
+    });
+
+    it("keeps the same active message through a product language switch and Back to the exact page", async () => {
+      const buyer = 93007;
+      const start = await call(
+        fixture.connectionCId,
+        messageUpdate(buyer, "/start", {}, "en"),
+        "bot-secret-c",
+      );
+      const home = start.transport.sentMessages.at(-1)!;
+
+      const pageTwo = await call(
+        fixture.connectionCId,
+        callbackUpdate(buyer, "prods:2", "en", home.messageId),
+        "bot-secret-c",
+      );
+      const list = pageTwo.transport.editedMessages.at(-1)!;
+      expect(list.messageId).toBe(home.messageId);
+      expect(list.text).toContain("Products (2/2)");
+      const productButton = inlineButtons(list).find((button) =>
+        button.callback_data?.startsWith("p:"),
+      );
+      expect(productButton?.callback_data).toBeDefined();
+
+      const product = await call(
+        fixture.connectionCId,
+        callbackUpdate(buyer, productButton!.callback_data!, "en", home.messageId),
+        "bot-secret-c",
+      );
+      const card = product.transport.editedMessages.at(-1)!;
+      expect(card.messageId).toBe(home.messageId);
+      const languageButton = inlineButtons(card).find((button) =>
+        button.callback_data?.startsWith("langs:"),
+      );
+      expect(languageButton?.callback_data).toBeDefined();
+
+      const menu = await call(
+        fixture.connectionCId,
+        callbackUpdate(buyer, languageButton!.callback_data!, "en", home.messageId),
+        "bot-secret-c",
+      );
+      const menuMessage = menu.transport.editedMessages.at(-1)!;
+      expect(menuMessage.messageId).toBe(home.messageId);
+      expect(menuMessage.text).toContain("Choose your language");
+      const arabic = inlineButtons(menuMessage).find((button) =>
+        button.callback_data?.startsWith("lang:ar"),
+      );
+      expect(arabic?.callback_data).toBeDefined();
+
+      const switched = await call(
+        fixture.connectionCId,
+        callbackUpdate(buyer, arabic!.callback_data!, "en", home.messageId),
+        "bot-secret-c",
+      );
+      const arabicCard = switched.transport.editedMessages.at(-1)!;
+      expect(arabicCard.messageId).toBe(home.messageId);
+      expect(arabicCard.text).toContain("Nav Item");
+      const back = inlineButtons(arabicCard).find((button) =>
+        button.callback_data?.startsWith("pb:"),
+      );
+      expect(back?.callback_data).toBeDefined();
+
+      const restored = await call(
+        fixture.connectionCId,
+        callbackUpdate(buyer, back!.callback_data!, "en", home.messageId),
+        "bot-secret-c",
+      );
+      const listAgain = restored.transport.editedMessages.at(-1)!;
+      expect(listAgain.messageId).toBe(home.messageId);
+      expect(listAgain.text).toContain("(2/2)");
+      expect(await activeStorefrontRow(buyer, fixture.connectionCId))
+        .toMatchObject({
+          activeMessageId: home.messageId,
+          route: "products",
+        });
+    });
+
+    it("replays checkout confirmation on the active browse screen without touching the receipt or duplicating commerce", async () => {
+      const buyer = 93008;
+      const { confirmData, transport: reviewTransport } = await completeReview(buyer);
+      const reviewId = lastScreenMessage(reviewTransport)!.messageId;
+
+      const transport = createFakeTelegramTransport();
+      const confirmed = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, confirmData, "en", reviewId),
+        "bot-secret-a",
+        transport,
+      );
+      const receipt = lastReceipt(confirmed.transport)!;
+      expect(receipt).toBeDefined();
+      const receiptId = receipt.messageId;
+      const reference = /ORD-[A-HJ-NP-Z2-9]{6}/.exec(receipt.text)?.[0];
+      expect(reference).toBeDefined();
+      const bridge = confirmed.transport.editedMessages.find(
+        (entry) => entry.messageId === reviewId,
+      )!;
+      expect(bridge.text).toContain(`Order ${reference} placed`);
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: reviewId,
+        route: "receipt_bridge",
+      });
+
+      const homeButton = inlineButtons(bridge).find(
+        (button) => button.callback_data === "home:new",
+      );
+      expect(homeButton).toBeDefined();
+      const home = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, homeButton!.callback_data!, "en", reviewId),
+        "bot-secret-a",
+        transport,
+      );
+      const homeMessage = home.transport.sentMessages.at(-1)!;
+      expect(homeMessage.text).toContain("Welcome to");
+      expect(homeMessage.messageId).not.toBe(receiptId);
+      expect(homeMessage.messageId).not.toBe(reviewId);
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: homeMessage.messageId,
+        route: "home",
+      });
+
+      // The old review message id is lower than the fresh browse screen in a
+      // real chat. The fake transport resets ids per call, so replay from the
+      // immediately preceding message id to prove the older-message path.
+      const replayed = await call(
+        fixture.connectionAId,
+        callbackUpdate(buyer, confirmData, "en", homeMessage.messageId - 1),
+        "bot-secret-a",
+        transport,
+      );
+      expect(replayed.status).toBe(200);
+      expect(lastText(replayed.transport)).toContain(reference!);
+      expect(lastText(replayed.transport)).toContain("37.00 SAR");
+      expect(
+        replayed.transport.editedMessages.some(
+          (entry) => entry.messageId === receiptId,
+        ),
+      ).toBe(false);
+      expect(
+        replayed.transport.sentMessages.filter((entry) =>
+          entry.text.includes(reference!),
+        ),
+      ).toHaveLength(1);
+      expect(await db().select().from(order)).toHaveLength(1);
+      expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+      expect(await activeStorefrontRow(buyer)).toMatchObject({
+        activeMessageId: homeMessage.messageId,
+        route: "receipt_bridge",
+      });
     });
   });
 

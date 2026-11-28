@@ -169,6 +169,13 @@
       "when": 1795878884479,
       "tag": "0023_telegram_navigation_context",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795882229287,
+      "tag": "0024_telegram_active_storefront",
+      "breakpoints": true
     }
   ]
 }

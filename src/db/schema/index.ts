@@ -39,6 +39,7 @@ export * from "./payment-methods";
 export * from "./seller-notifications";
 export * from "./settings";
 export * from "./telegram";
+export * from "./telegram-active-storefront";
 export * from "./telegram-navigation";
 export * from "./telegram-connections";
 export * from "./tenant";

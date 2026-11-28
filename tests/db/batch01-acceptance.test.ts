@@ -168,6 +168,7 @@ beforeEach(async () => {
       "order",
       "cart_item",
       "cart",
+      "telegram_active_storefront",
       "telegram_managed_update"
     restart identity cascade
   `);
@@ -408,7 +409,9 @@ describe.skipIf(!shouldRun)("Batch 01 merchant-to-buyer acceptance", () => {
     expect(reviewText).toContain("Delivery fee: 12.50 EGP");
     expect(reviewText).toContain("Total: 61.50 EGP");
 
-    const reviewMessage = [...review.transport.sentMessages].reverse()[0];
+    const reviewMessage =
+      review.transport.editedMessages.at(-1) ??
+      [...review.transport.sentMessages].reverse()[0];
     const confirm = inlineButtons(reviewMessage).find((b) =>
       b.callback_data?.startsWith("cc:"),
     );

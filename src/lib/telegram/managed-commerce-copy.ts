@@ -38,6 +38,7 @@ export type CommerceCopy = {
   languageEnglish: string;
   languageSaved: string;
   invalidLanguage: string;
+  staleScreen: string;
   askSellerOnTelegram: string;
   telegramSupportDraft: (productName: string) => string;
   welcome: (storeName: string) => string;
@@ -138,6 +139,8 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     languageSaved: "Language updated.",
     invalidLanguage:
       "That language is not available. Choose Arabic or English.",
+    staleScreen:
+      "This screen is no longer active. Use the newest storefront message.",
     askSellerOnTelegram: "Ask the seller on Telegram",
     telegramSupportDraft: (productName) =>
       `Hi, I have a question about ${productName}: `,
@@ -258,6 +261,8 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     languageEnglish: "English",
     languageSaved: "تم تحديث اللغة.",
     invalidLanguage: "هذه اللغة غير متاحة. اختر العربية أو الإنجليزية.",
+    staleScreen:
+      "هذه الشاشة لم تعد نشطة. استخدم أحدث رسالة في المتجر.",
     askSellerOnTelegram: "اسأل البائع على Telegram",
     telegramSupportDraft: (productName) =>
       `مرحبًا، عندي سؤال عن ${productName}: `,
